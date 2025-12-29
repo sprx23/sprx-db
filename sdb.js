@@ -1,11 +1,17 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+const isNode = typeof process !== 'undefined' && process.versions?.node;
 
 class SDB {
-    constructor() {
+    constructor(data, isfile) {
         this.__objects = new Map();
         this.__masterTable = new Map();
+
+        if (isfile) {
+            if (!isNode) throw "Cannot read file in browser env."
+            data = readFileSync()
+        }
     }
 
     setObject(id, data, type = 'TEXT') {
@@ -115,5 +121,4 @@ class SDB {
 const sdb = new SDB();
 sdb.addObject('mydata', 'Hello!');
 sdb.addObject('myfile', 'package.json', 'FILE')
-sdb.addObject('mydir', 'dontshow', 'DIR')
-writeFileSync("output.sdb", sdb.serialize("Hello, World!"))
+console.log(sdb.serialize("Hello, World!"))
