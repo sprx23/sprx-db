@@ -1,0 +1,1 @@
+Basically this is Sprx Database format for storing objects in a file. It serializes everything in text that is valid utf-8 for easy transfer from one place to another using tech like (Pastebin.com)[pastebin.com]. It can transfer many text files as a single file or many binary files as well.
