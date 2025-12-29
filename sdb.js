@@ -1,17 +1,11 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-const isNode = typeof process !== 'undefined' && process.versions?.node;
 
 class SDB {
-    constructor(data, isfile) {
+    constructor() {
         this.__objects = new Map();
         this.__masterTable = new Map();
-
-        if (isfile) {
-            if (!isNode) throw "Cannot read file in browser env."
-            data = readFileSync()
-        }
     }
 
     setObject(id, data, type = 'TEXT') {
@@ -115,10 +109,131 @@ class SDB {
 
         return top + hash + '\n' + payload;
     }
+
+    serializeToFile(path, comment) {
+        writeFileSync(path, sdb.serialize(comment))
+    }
+
+    // Deserialize a serialized SDB string and return a populated SDB instance.
+    // Throws on invalid format or checksum mismatch.
+    static deserialize(serialized) {
+        const MAGIC = '#!SPRXDB t01\n';
+        if (!serialized.startsWith(MAGIC)) {
+            throw new Error('Invalid SDB magic header');
+        }
+
+        let rest = serialized.slice(MAGIC.length);
+
+        const timestampEnd = rest.indexOf('\n');
+        if (timestampEnd === -1) throw new Error('Invalid SDB: missing timestamp');
+        const timestamp = rest.slice(0, timestampEnd);
+        rest = rest.slice(timestampEnd + 1);
+
+        const hashEnd = rest.indexOf('\n');
+        if (hashEnd === -1) throw new Error('Invalid SDB: missing hash');
+        const hash = rest.slice(0, hashEnd);
+        const payload = rest.slice(hashEnd + 1);
+
+        // verify checksum
+        const computed = createHash('md5').update(payload).digest('hex');
+        if (computed !== hash) {
+            throw new Error('Checksum mismatch');
+        }
+
+        // parse header / data
+        const headMarker = '\nHEAD\n';
+        const headMarkerIndex = payload.indexOf(headMarker);
+        if (headMarkerIndex === -1) throw new Error('Invalid SDB: missing HEAD marker');
+
+        // header prefix contains "<len> <comment>"
+        const headerPrefix = payload.slice(0, headMarkerIndex);
+        const firstSpace = headerPrefix.indexOf(' ');
+        if (firstSpace === -1) throw new Error('Invalid SDB header comment format');
+        const commentLenStr = headerPrefix.slice(0, firstSpace);
+        const commentLen = parseInt(commentLenStr, 10);
+        const comment = headerPrefix.slice(firstSpace + 1);
+        // optional: verify comment length (note: comment may contain multi-byte utf8; original used .length)
+        if (!Number.isNaN(commentLen) && commentLen !== comment.length) {
+            // not fatal, but warn? we'll not throw; keep original comment
+        }
+
+        // find end of header (HEAD END)
+        const headEndMarker = 'HEAD END';
+        const headEndIndex = payload.indexOf(headEndMarker, headMarkerIndex);
+        if (headEndIndex === -1) throw new Error('Invalid SDB: missing HEAD END');
+
+        // extract header rows between 'HEAD\n' and 'HEAD END'
+        const headerRowsStart = headMarkerIndex + headMarker.length;
+        const headerBody = payload.slice(headerRowsStart, headEndIndex);
+        const headerLines = headerBody.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+        // data area is between headEndIndex + length and the footer "\nEND"
+        const dataStart = headEndIndex + headEndMarker.length;
+        const footerIndex = payload.indexOf('\nEND', dataStart);
+        if (footerIndex === -1) throw new Error('Invalid SDB: missing footer END');
+        const dataString = payload.slice(dataStart, footerIndex);
+
+        const sdb = new SDB();
+
+        for (const line of headerLines) {
+            // each line is JSON array contents without surrounding [ ]
+            // rebuild and parse
+            let arr;
+            try {
+                arr = JSON.parse('[' + line + ']');
+            } catch (e) {
+                // skip malformed row
+                continue;
+            }
+            // expected: [id, type, creTime, modTime, version, pos, len]
+            const [id, type, creTime, modTime, version, pos, len] = arr;
+
+            if (typeof pos !== 'number' || typeof len !== 'number') {
+                continue;
+            }
+
+            const rawValue = dataString.substr(pos, len);
+
+            let value = rawValue;
+            if (type === 'FILE' || type === 'BIN') {
+                // decode base64 back to Buffer
+                value = Buffer.from(rawValue, 'base64');
+            } else {
+                // for TEXT (and other non-binary) try JSON.parse if it was JSON serialized
+                // attempt parse, otherwise keep raw string
+                try {
+                    value = JSON.parse(rawValue);
+                } catch (e) {
+                    value = rawValue;
+                }
+            }
+
+            sdb.__objects.set(id, value);
+            sdb.__masterTable.set(id, {
+                creTime: creTime,
+                modTime: modTime,
+                version: version,
+                type: type
+            });
+        }
+
+        return sdb;
+    }
+
+    // Convenience: deserialize from a file path
+    static deserializeFile(path) {
+        const content = readFileSync(path, 'utf8');
+        return SDB.deserialize(content);
+    }
 }
 
 /* usage */
 const sdb = new SDB();
-sdb.addObject('mydata', 'Hello!');
-sdb.addObject('myfile', 'package.json', 'FILE')
-console.log(sdb.serialize("Hello, World!"))
+sdb.setObject('mydata', 'Hello!');
+writeFileSync("output.sdb", sdb.serialize("Hello, World!"))
+
+// Example: read back
+const loaded = SDB.deserializeFile('output.sdb');
+console.log(loaded.getObject('mydata'));
+
+export default SDB;
